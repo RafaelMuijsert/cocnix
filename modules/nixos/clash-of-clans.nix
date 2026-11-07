@@ -1,4 +1,13 @@
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  # Provided by the flake wrapper. It is a fetchurl derivation when the flake is
+  # fetched from GitHub (which stores the APK through Git LFS, unsupported by
+  # Nix), and the real working-tree file for local path flakes.
+  clashOfClansDefaultApk ? ../../apk/clash-of-clans.apk,
+  ...
+}:
 
 let
   cfg = config.programs.clash-of-clans;
@@ -13,7 +22,7 @@ let
   #   CN=Visa Forsten, OU=Supercell, O=Supercell, L=Helsinki, ST=Uusimaa, C=FI
   defaultTrustedSignerSha256 = "9ea146d935c0be2e4b576396e6a5e1de6dcb69a71af4e417b0a5b8fe8e0d4d9c";
 
-  defaultApk = ../../apk/clash-of-clans.apk;
+  defaultApk = clashOfClansDefaultApk;
 
   # Verify the APK signer at build time. The resulting path is a symlink to the
   # original APK, so the 900MB+ file is not duplicated in the store.
