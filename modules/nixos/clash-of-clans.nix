@@ -62,12 +62,49 @@ let
 
   # Install the APK lazily on first launch. Waydroid's app installer needs a
   # running user session, so this cannot be done from a system service at boot.
-  installBlock = lib.optionalString (verifiedApk != null) ''
-    if ! waydroid app list 2>/dev/null | grep -q "$app_id"; then
-      echo "Installing Clash of Clans..."
-      waydroid app install "${verifiedApk}"
-    fi
-  '';
+  #
+  # With a bundled APK the game must end up installed: never silently fall back
+  # to the Play Store. The package manager can take a moment to report a freshly
+  # installed package, so poll before giving up.
+  installOrLaunch =
+    if verifiedApk != null then
+      ''
+        if ! app_installed; then
+          echo "Installing Clash of Clans..."
+          if ! waydroid app install "${verifiedApk}"; then
+            echo "clash-of-clans: failed to install the bundled APK." >&2
+            exit 1
+          fi
+        fi
+
+        for _ in $(seq 1 30); do
+          if app_installed; then
+            break
+          fi
+          sleep 1
+        done
+
+        if ! app_installed; then
+          echo "clash-of-clans: the APK was installed but Clash of Clans is not" >&2
+          echo "listed. Re-run 'clash-of-clans'; if this persists, check" >&2
+          echo "'waydroid app list'." >&2
+          exit 1
+        fi
+
+        exec waydroid app launch "$app_id"
+      ''
+    else
+      ''
+        play_store_id="${playStoreId}"
+
+        if app_installed; then
+          exec waydroid app launch "$app_id"
+        fi
+
+        echo "Clash of Clans is not installed."
+        echo "Opening the Play Store. Install the game there, then run 'clash-of-clans' again."
+        exec waydroid app launch "$play_store_id"
+      '';
 
   launcher = pkgs.writeShellApplication {
     name = "clash-of-clans";
@@ -105,15 +142,25 @@ let
         exit 1
       fi
 
-      ${installBlock}
+      # Wait for Android to finish booting. Launching an app while the system
+      # is still starting up can leave it running with a frozen display.
+      for _ in $(seq 1 60); do
+        if [ "$(waydroid prop get sys.boot_completed 2>/dev/null || true)" = "1" ]; then
+          break
+        fi
+        sleep 1
+      done
 
-      if waydroid app list 2>/dev/null | grep -q "$app_id"; then
-        exec waydroid app launch "$app_id"
-      fi
+      # Waydroid freezes the whole container on suspend, which leaves the last
+      # frame on screen and stops the game. Keep the container awake while the
+      # app is open.
+      waydroid prop set persist.waydroid.suspend false >/dev/null 2>&1 || true
 
-      echo "Clash of Clans is not installed."
-      echo "Opening the Play Store. Install the game there, then run 'clash-of-clans' again."
-      exec waydroid app launch "${playStoreId}"
+      app_installed() {
+        waydroid app list 2>/dev/null | grep -F "packageName: $app_id" >/dev/null
+      }
+
+      ${installOrLaunch}
     '';
   };
 
@@ -224,6 +271,33 @@ in
         RemainAfterExit = true;
         ExecStart = "${waydroid}/bin/waydroid init -s ${cfg.androidVariant}";
       };
+    };
+
+    # Waydroid freezes the whole container on Android's suspend (after the
+    # display timeout), leaving the last frame on screen while the app keeps
+    # running invisibly. The launcher opts out at runtime too, but injecting the
+    # property into the base props makes it apply to the very first session,
+    # before Android has booted.
+    systemd.services.waydroid-keep-awake = {
+      description = "Disable Waydroid container suspend";
+      wantedBy = [ "multi-user.target" ];
+      after = lib.optionals cfg.autoInitialize [ "waydroid-init.service" ];
+      before = [ "waydroid-container.service" ];
+      unitConfig.ConditionPathExists = "/var/lib/waydroid/waydroid_base.prop";
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      path = [
+        pkgs.coreutils
+        pkgs.gnugrep
+        pkgs.gnused
+      ];
+      script = ''
+        prop=/var/lib/waydroid/waydroid_base.prop
+        sed -i '/^persist\.waydroid\.suspend=/d' "$prop"
+        echo 'persist.waydroid.suspend=false' >> "$prop"
+      '';
     };
 
     environment.systemPackages = [ launcherPackage ];
