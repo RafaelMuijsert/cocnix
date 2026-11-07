@@ -156,6 +156,11 @@ let
       # app is open.
       waydroid prop set persist.waydroid.suspend false >/dev/null 2>&1 || true
 
+      # Waydroid throttles rendering using wp_presentation feedback. Compositors
+      # that only present while animating (niri) stall it between frames, which
+      # shows up as a frozen image that only updates while switching windows.
+      waydroid prop set persist.waydroid.no_presentation true >/dev/null 2>&1 || true
+
       app_installed() {
         waydroid app list 2>/dev/null | grep -F "packageName: $app_id" >/dev/null
       }
@@ -235,6 +240,16 @@ in
         certificate.
       '';
     };
+
+    disableGoogleAssistant = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Disable the Google app (which provides Google Assistant) inside
+        Waydroid. On desktop setups the Meta/Alt key can trigger the Assistant
+        and steal input from the game.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -273,13 +288,16 @@ in
       };
     };
 
-    # Waydroid freezes the whole container on Android's suspend (after the
-    # display timeout), leaving the last frame on screen while the app keeps
-    # running invisibly. The launcher opts out at runtime too, but injecting the
-    # property into the base props makes it apply to the very first session,
-    # before Android has booted.
-    systemd.services.waydroid-keep-awake = {
-      description = "Disable Waydroid container suspend";
+    # The launcher sets these at runtime too, but injecting them into the base
+    # props makes them apply to the very first session, before Android boots.
+    #
+    # - suspend=false: Waydroid freezes the whole container on Android's
+    #   suspend, leaving a stale frame on screen while the app keeps running.
+    # - no_presentation=true: disable wp_presentation feedback. Waydroid throttles
+    #   frames based on it, which stalls on compositors like niri that only
+    #   present while something is animating.
+    systemd.services.waydroid-props = {
+      description = "Tune Waydroid container for desktop use";
       wantedBy = [ "multi-user.target" ];
       after = lib.optionals cfg.autoInitialize [ "waydroid-init.service" ];
       before = [ "waydroid-container.service" ];
@@ -290,13 +308,44 @@ in
       };
       path = [
         pkgs.coreutils
-        pkgs.gnugrep
         pkgs.gnused
       ];
       script = ''
         prop=/var/lib/waydroid/waydroid_base.prop
         sed -i '/^persist\.waydroid\.suspend=/d' "$prop"
-        echo 'persist.waydroid.suspend=false' >> "$prop"
+        sed -i '/^persist\.waydroid\.no_presentation=/d' "$prop"
+        printf '%s\n' \
+          'persist.waydroid.suspend=false' \
+          'persist.waydroid.no_presentation=true' >> "$prop"
+      '';
+    };
+
+    # The Google app is what handles the Assistant gesture. Pressing Meta/Alt
+    # opens it full-screen and steals input from the game, so disable it. This
+    # needs root (it is a system package), hence a service rather than the
+    # launcher. It waits until Android has booted, then exits.
+    systemd.services.waydroid-disable-assistant = lib.mkIf cfg.disableGoogleAssistant {
+      description = "Disable Google Assistant inside Waydroid";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "waydroid-container.service" ];
+      path = [
+        waydroid
+        pkgs.coreutils
+      ];
+      serviceConfig = {
+        Type = "simple";
+        Restart = "no";
+      };
+      script = ''
+        until [ "$(waydroid shell getprop sys.boot_completed 2>/dev/null | tr -d '\r\n')" = "1" ]; do
+          sleep 5
+        done
+        for package in \
+          com.google.android.googlequicksearchbox \
+          com.google.android.apps.googleassistant
+        do
+          waydroid shell pm disable-user --user 0 "$package" >/dev/null 2>&1 || true
+        done
       '';
     };
 
