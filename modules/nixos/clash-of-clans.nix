@@ -203,6 +203,14 @@ in
 
     virtualisation.waydroid.enable = true;
 
+    # The waydroid module only picks the nftables variant when
+    # `networking.nftables.enable` is set, but NixOS' own firewall may already
+    # be nftables-only while that option is false. On such kernels the
+    # iptables variant fails with "Table does not exist". NixOS kernels ship
+    # nf_tables, so default to the nftables build; override
+    # `virtualisation.waydroid.package` if your kernel really needs iptables.
+    virtualisation.waydroid.package = lib.mkDefault pkgs.waydroid-nftables;
+
     systemd.services.waydroid-init = lib.mkIf cfg.autoInitialize {
       description = "Initialize the Waydroid Android image";
       wantedBy = [ "multi-user.target" ];
